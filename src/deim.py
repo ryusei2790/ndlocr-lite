@@ -121,6 +121,7 @@ class DEIM:
         
     def detect(self, img: np.ndarray) -> List:
         input_tensor = self.preprocess(img)
+        #print(self.input_shape)
         outputs = self.session.run(self.output_names, {self.input_names[0]: input_tensor,self.input_names[1]:np.array([[self.input_height, self.input_width]],np.int64)})
         return self.postprocess(outputs)
     
