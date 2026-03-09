@@ -86,6 +86,7 @@ def get_detector(args):
                       iou_threshold=args.det_iou_threshold,
                       device=args.device)
     return detector
+
 def get_recognizer(args,weights_path=None):
     if weights_path is None:
         weights_path = args.rec_weights
@@ -101,7 +102,6 @@ def get_recognizer(args,weights_path=None):
     
     recognizer = PARSEQ(model_path=weights_path,charlist=charlist,device=args.device)
     return recognizer
-
 
 def inference_on_detector(args,inputname:str,npimage:np.ndarray,outputpath:str,issaveimg:bool=True):
     print("[INFO] Intialize Model")
@@ -160,6 +160,7 @@ def process(args):
     recognizer50=get_recognizer(args=args,weights_path=args.rec_weights50)
     tatelinecnt=0
     alllinecnt=0
+    
     for inputpath in inputpathlist:
         ext=inputpath.split(".")[-1]
         pil_image = Image.open(inputpath).convert('RGB')
@@ -184,7 +185,7 @@ def process(args):
             resultobj[1][det["class_index"]].append([xmin,ymin,xmax,ymax,conf])
         xmlstr=convert_to_xml_string3(img_w, img_h, imgname, classeslist, resultobj)
         xmlstr="<OCRDATASET>"+xmlstr+"</OCRDATASET>"
-        #print(xmlstr)
+        # print(xmlstr)
         root = ET.fromstring(xmlstr)
         eval_xml(root, logger=None)
         alllineobj = []
@@ -217,7 +218,9 @@ def process(args):
                 line_h = int(ymax - ymin)
                 if line_w > 0 and line_h > 0:
                     line_elem = ET.SubElement(page, "LINE")
-                    line_elem.set("TYPE", "本文")
+                    c_idx = int(det["class_index"])
+                    type_name = classeslist[c_idx] if c_idx < len(classeslist) else "本文"
+                    line_elem.set("TYPE", type_name)
                     line_elem.set("X", str(int(xmin)))
                     line_elem.set("Y", str(int(ymin)))
                     line_elem.set("WIDTH", str(line_w))
@@ -237,7 +240,7 @@ def process(args):
             alllineobj, recognizer30, recognizer50, recognizer100, is_cascade=True
         )
         alltextlist.append("\n".join(resultlinesall))
-        used_detections = set()
+        
         for idx,lineobj in enumerate(root.findall(".//LINE")):
             lineobj.set("STRING",resultlinesall[idx])
             xmin=int(lineobj.get("X"))
@@ -249,50 +252,13 @@ def process(args):
             except:
                 conf=0.0
             
-            # Map back to raw detections via highest IoU to extract class index
-            best_iou = 0.0
-            best_det_idx = -1
-            for d_idx, det in enumerate(detections):
-                d_xmin, d_ymin, d_xmax, d_ymax = det["box"]
-                inter_x1 = max(xmin, d_xmin)
-                inter_y1 = max(ymin, d_ymin)
-                inter_x2 = min(xmin+line_w, d_xmax)
-                inter_y2 = min(ymin+line_h, d_ymax)
-                if inter_x2 > inter_x1 and inter_y2 > inter_y1:
-                    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-                    union_area = (line_w * line_h) + ((d_xmax - d_xmin) * (d_ymax - d_ymin)) - inter_area
-                    iou = inter_area / union_area
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_det_idx = d_idx
-                        
-            c_idx = 1
-            if best_det_idx != -1:
-                c_idx = int(detections[best_det_idx]["class_index"])
-                used_detections.add(best_det_idx)
+            # XML TYPE -> c_idx
+            type_str = lineobj.get("TYPE", "")
+            c_idx = classeslist.index(type_str) if type_str in classeslist else 1
 
             jsonobj={"boundingBox": [[xmin,ymin],[xmin,ymin+line_h],[xmin+line_w,ymin],[xmin+line_w,ymin+line_h]],
                 "id": idx,"isVertical": "true","text": resultlinesall[idx],"isTextline": "true","confidence": conf, "class_index": c_idx}
             resjsonarray.append(jsonobj)
-        
-        # Output unmapped bounding boxes if requested
-        if getattr(args, "output_all_classes", False):
-            for d_idx, det in enumerate(detections):
-                if d_idx not in used_detections:
-                    d_xmin, d_ymin, d_xmax, d_ymax = det["box"]
-                    d_conf = float(det["confidence"])
-                    c_idx = int(det["class_index"])
-                    d_xmin, d_ymin, d_xmax, d_ymax = int(d_xmin), int(d_ymin), int(d_xmax), int(d_ymax)
-                    jsonobj = {
-                        "boundingBox": [[d_xmin, d_ymin], [d_xmin, d_ymax],[d_xmax, d_ymin], [d_xmax, d_ymax]],
-                        "id": len(resjsonarray),
-                        "isVertical": "true",
-                        "text": "",
-                        "isTextline": "false",
-                        "confidence": d_conf,
-                        "class_index": c_idx
-                    }
-                    resjsonarray.append(jsonobj)
 
         allxmlstr+=(ET.tostring(root.find("PAGE"), encoding='unicode')+"\n")
         allxmlstr+="</OCRDATASET>"
@@ -343,7 +309,6 @@ def main():
     parser.add_argument("--rec-weights", type=str, required=False, help="Path to parseq-tiny onnx file", default=str(base_dir / "model" / "parseq-ndl-16x768-100-tiny-165epoch-tegaki2.onnx"))
     parser.add_argument("--rec-classes", type=str, required=False, help="Path to list of class in yaml file", default=str(base_dir / "config" / "NDLmoji.yaml"))
     parser.add_argument("--device", type=str, required=False, help="Device use (cpu or cuda)", choices=["cpu", "cuda"], default="cpu")
-    parser.add_argument("--output-all-classes", action="store_true", help="Output all detected lines to JSON regardless of their class_index")
     parser.add_argument("--json-only", action="store_true", help="Disable .xml and .txt output and only output JSON")
     args = parser.parse_args()
     process(args)
