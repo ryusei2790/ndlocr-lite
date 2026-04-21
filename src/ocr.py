@@ -26,10 +26,8 @@ class RecogLine:
     def __lt__(self, other):
         return self.idx < other.idx
 
-def process_cascade(alllineobj,recognizer30,recognizer50,recognizer100,is_cascade=True):
-    targetdflist30=[]
-    targetdflist50=[]
-    targetdflist100=[]
+def process_cascade(alllineobj:RecogLine,recognizer30,recognizer50,recognizer100,is_cascade=True):
+    targetdflist30,targetdflist50,targetdflist100,targetdflist200=[],[],[],[]
     for lineobj in alllineobj:
         if lineobj.pred_char_cnt==3 and is_cascade:
             targetdflist30.append(lineobj)
@@ -39,7 +37,7 @@ def process_cascade(alllineobj,recognizer30,recognizer50,recognizer100,is_cascad
             targetdflist100.append(lineobj)
     targetdflistall=[]
     with ThreadPoolExecutor(thread_name_prefix="thread") as executor:
-        resultlines30,resultlines50,resultlines100=[],[],[]
+        resultlines30,resultlines50,resultlines100,resultlines200=[],[],[],[]
         if len(targetdflist30)>0:
             resultlines30 = executor.map(recognizer30.read, [t.npimg for t in targetdflist30])
             resultlines30 = list(resultlines30)
@@ -69,7 +67,21 @@ def process_cascade(alllineobj,recognizer30,recognizer50,recognizer100,is_cascad
             pred_str=resultlines100[i]
             lineobj=targetdflist100[i]
             lineobj.pred_str=pred_str
-            targetdflistall.append(lineobj)                    
+            if len(pred_str)>=98 and lineobj.npimg.shape[0]<lineobj.npimg.shape[1]:
+                baseimg=lineobj.npimg
+                tmplineobj_1=RecogLine(npimg=baseimg[:,:baseimg.shape[1]//2,:],idx=lineobj.idx,pred_char_cnt=100)
+                tmplineobj_2=RecogLine(npimg=baseimg[:,baseimg.shape[1]//2:,:],idx=lineobj.idx,pred_char_cnt=100)
+                targetdflist200.append(tmplineobj_1)
+                targetdflist200.append(tmplineobj_2)
+            else:
+                targetdflistall.append(lineobj)
+        if len(targetdflist200)>0:
+            resultlines200 = executor.map(recognizer100.read, [t.npimg for t in targetdflist200])
+            resultlines200 = list(resultlines200)
+            for i in range(0,len(targetdflist200)-1,2):
+                ia=targetdflist200[i]
+                lineobj=RecogLine(npimg=None,idx=ia.idx,pred_char_cnt=100,pred_str=resultlines200[i]+resultlines200[i+1])
+                targetdflistall.append(lineobj)
         targetdflistall=sorted(targetdflistall)
         resultlinesall=[t.pred_str for t in targetdflistall]
     return resultlinesall
@@ -86,6 +98,7 @@ def get_detector(args):
                       iou_threshold=args.det_iou_threshold,
                       device=args.device)
     return detector
+
 def get_recognizer(args,weights_path=None):
     if weights_path is None:
         weights_path = args.rec_weights
@@ -105,7 +118,6 @@ def get_recognizer(args,weights_path=None):
         tcy_kwargs = {k: v for k, v in vars(args).items() if k.startswith('tcy_') and k != 'enable_tcy' and v is not None}
         recognizer = TateChuYokoWrapper(recognizer, **tcy_kwargs)
     return recognizer
-
 
 def inference_on_detector(args,inputname:str,npimage:np.ndarray,outputpath:str,issaveimg:bool=True):
     print("[INFO] Intialize Model")
@@ -164,6 +176,7 @@ def process(args):
     recognizer50=get_recognizer(args=args,weights_path=args.rec_weights50)
     tatelinecnt=0
     alllinecnt=0
+    
     for inputpath in inputpathlist:
         ext=inputpath.split(".")[-1]
         pil_image = Image.open(inputpath).convert('RGB')
@@ -183,12 +196,13 @@ def process(args):
         for det in detections:
             xmin,ymin,xmax,ymax=det["box"]
             conf=det["confidence"]
+            char_count=det["pred_char_count"]
             if det["class_index"]==0:
                 resultobj[0][0].append([xmin,ymin,xmax,ymax])
-            resultobj[1][det["class_index"]].append([xmin,ymin,xmax,ymax,conf])
+            resultobj[1][det["class_index"]].append([xmin,ymin,xmax,ymax,conf,char_count])
         xmlstr=convert_to_xml_string3(img_w, img_h, imgname, classeslist, resultobj)
         xmlstr="<OCRDATASET>"+xmlstr+"</OCRDATASET>"
-        #print(xmlstr)
+        # print(xmlstr)
         root = ET.fromstring(xmlstr)
         eval_xml(root, logger=None)
         alllineobj = []
@@ -221,7 +235,9 @@ def process(args):
                 line_h = int(ymax - ymin)
                 if line_w > 0 and line_h > 0:
                     line_elem = ET.SubElement(page, "LINE")
-                    line_elem.set("TYPE", "本文")
+                    c_idx = int(det["class_index"])
+                    type_name = classeslist[c_idx] if c_idx < len(classeslist) else "本文"
+                    line_elem.set("TYPE", type_name)
                     line_elem.set("X", str(int(xmin)))
                     line_elem.set("Y", str(int(ymin)))
                     line_elem.set("WIDTH", str(line_w))
@@ -241,6 +257,7 @@ def process(args):
             alllineobj, recognizer30, recognizer50, recognizer100, is_cascade=True
         )
         alltextlist.append("\n".join(resultlinesall))
+        
         for idx,lineobj in enumerate(root.findall(".//LINE")):
             lineobj.set("STRING",resultlinesall[idx])
             xmin=int(lineobj.get("X"))
@@ -250,17 +267,26 @@ def process(args):
             try:
                 conf=float(lineobj.get("CONF"))
             except:
-                conf=0
+                conf=0.0
+            
+            # XML TYPE -> c_idx
+            type_str = lineobj.get("TYPE", "")
+            c_idx = classeslist.index(type_str) if type_str in classeslist else 1
+
             jsonobj={"boundingBox": [[xmin,ymin],[xmin,ymin+line_h],[xmin+line_w,ymin],[xmin+line_w,ymin+line_h]],
-                "id": idx,"isVertical": "true","text": resultlinesall[idx],"isTextline": "true","confidence": conf}
+                "id": idx,"isVertical": "true","text": resultlinesall[idx],"isTextline": "true","confidence": conf, "class_index": c_idx}
             resjsonarray.append(jsonobj)
+
         allxmlstr+=(ET.tostring(root.find("PAGE"), encoding='unicode')+"\n")
         allxmlstr+="</OCRDATASET>"
         if alllinecnt>0 and tatelinecnt/alllinecnt>0.5:
             alltextlist=alltextlist[::-1]
         output_stem = os.path.splitext(os.path.basename(inputpath))[0]
-        with open(os.path.join(args.output,output_stem+".xml"),"w",encoding="utf-8") as wf:
-            wf.write(allxmlstr)
+        
+        if not getattr(args, "json_only", False):
+            with open(os.path.join(args.output,output_stem+".xml"),"w",encoding="utf-8") as wf:
+                wf.write(allxmlstr)
+                
         with open(os.path.join(args.output,output_stem+".json"),"w",encoding="utf-8") as wf:
             alljsonobj={
                 "contents":[resjsonarray],
@@ -273,8 +299,10 @@ def process(args):
             }
             alljsonstr=json.dumps(alljsonobj,ensure_ascii=False,indent=2)
             wf.write(alljsonstr)
-        with open(os.path.join(args.output,output_stem+".txt"),"w",encoding="utf-8") as wtf:
-            wtf.write("\n".join(alltextlist))
+            
+        if not getattr(args, "json_only", False):
+            with open(os.path.join(args.output,output_stem+".txt"),"w",encoding="utf-8") as wtf:
+                wtf.write("\n".join(alltextlist))
         print("Total calculation time (Detection + Recognition):",time.time()-start)
 
 def main():
@@ -307,6 +335,8 @@ def main():
         for k, v in vars(tcy_args).items():
             if v is not None:
                 setattr(args, k, v)
+    parser.add_argument("--json-only", action="store_true", help="Disable .xml and .txt output and only output JSON")
+    args = parser.parse_args()
     process(args)
 
 if __name__=="__main__":
